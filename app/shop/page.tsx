@@ -1,10 +1,34 @@
 import Link from "next/link";
 import { createClient } from "@/lib/supabase/server";
+import FavoriteButton from "@/components/FavoriteButton";
 
-export default async function ShopPage() {
+type SearchParams = Promise<{
+  search?: string;
+  make?: string;
+  type?: string;
+  status?: string;
+  minPrice?: string;
+  maxPrice?: string;
+  sort?: string;
+}>;
+
+export default async function ShopPage({
+  searchParams,
+}: {
+  searchParams: SearchParams;
+}) {
+  const params = await searchParams;
   const supabase = await createClient();
 
-  const { data: bikes, error } = await supabase
+  const search = params.search?.trim() ?? "";
+  const make = params.make?.trim() ?? "";
+  const type = params.type?.trim() ?? "";
+  const status = params.status?.trim() ?? "";
+  const minPrice = Number(params.minPrice ?? 0);
+  const maxPrice = Number(params.maxPrice ?? 0);
+  const sort = params.sort ?? "newest";
+
+  let query = supabase
     .from("bikes")
     .select(`
       id,
@@ -21,19 +45,93 @@ export default async function ShopPage() {
       condition,
       description,
       status,
+      created_at,
       bike_images (
         storage_path,
         alt_text,
         display_order
       )
     `)
-    .eq("published", true)
-    .in("status", ["available", "reserved"])
-    .order("created_at", { ascending: false });
+    .eq("published", true);
 
-  if (error) {
-    console.error("Shop inventory error:", error);
+  if (search) {
+    query = query.or(
+      `make.ilike.%${search}%,model.ilike.%${search}%,stock_number.ilike.%${search}%`
+    );
   }
+
+  if (make) {
+    query = query.eq("make", make);
+  }
+
+  if (type) {
+    query = query.eq("bike_type", type);
+  }
+
+  if (status) {
+    query = query.eq("status", status);
+  } else {
+    query = query.in("status", ["available", "reserved"]);
+  }
+
+  if (minPrice > 0) {
+    query = query.gte(
+      "price_cents",
+      Math.round(minPrice * 100)
+    );
+  }
+
+  if (maxPrice > 0) {
+    query = query.lte(
+      "price_cents",
+      Math.round(maxPrice * 100)
+    );
+  }
+
+  if (sort === "price-low") {
+    query = query.order("price_cents", {
+      ascending: true,
+    });
+  } else if (sort === "price-high") {
+    query = query.order("price_cents", {
+      ascending: false,
+    });
+  } else if (sort === "mileage") {
+    query = query.order("mileage", {
+      ascending: true,
+    });
+  } else if (sort === "year") {
+    query = query.order("model_year", {
+      ascending: false,
+    });
+  } else {
+    query = query.order("created_at", {
+      ascending: false,
+    });
+  }
+
+  const { data: bikes } = await query;
+
+  const { data: filterBikes } = await supabase
+    .from("bikes")
+    .select("make, bike_type")
+    .eq("published", true);
+
+  const makes = Array.from(
+    new Set(
+      (filterBikes ?? [])
+        .map((bike) => bike.make)
+        .filter(Boolean)
+    )
+  ).sort();
+
+  const bikeTypes = Array.from(
+    new Set(
+      (filterBikes ?? [])
+        .map((bike) => bike.bike_type)
+        .filter(Boolean)
+    )
+  ).sort();
 
   const bikesWithImages = await Promise.all(
     (bikes ?? []).map(async (bike) => {
@@ -69,70 +167,154 @@ export default async function ShopPage() {
 
   return (
     <main className="min-h-screen bg-[#07111f] text-white">
-      <header className="border-b border-white/10 bg-[#07111f]/90 backdrop-blur-xl">
+      <header className="border-b border-white/10">
         <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-5">
-          <Link
-            href="/"
-            className="flex items-center gap-3"
-          >
-            <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-orange-500 font-bold">
-              JS
-            </div>
-
-            <div>
-              <p className="font-bold">
-                Jeffrey Smith
-              </p>
-
-              <p className="text-xs text-slate-400">
-                Used Bikes
-              </p>
-            </div>
+          <Link href="/" className="text-xl font-bold">
+            Jeffrey Smith Used Bikes
           </Link>
 
-          <nav className="flex items-center gap-6 text-sm font-semibold">
-            <Link
-              href="/"
-              className="text-slate-300 hover:text-white"
-            >
-              Home
-            </Link>
-
-            <Link
-              href="/shop"
-              className="text-orange-400"
-            >
-              Shop
-            </Link>
-          </nav>
+          <Link
+            href="/"
+            className="text-sm font-semibold text-slate-300 hover:text-white"
+          >
+            Home
+          </Link>
         </div>
       </header>
 
-      <section className="mx-auto max-w-7xl px-6 py-16">
-        <div className="mb-12">
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-400">
-            Available Inventory
-          </p>
+      <div className="mx-auto max-w-7xl px-6 py-12">
+        <p className="text-sm font-bold uppercase tracking-[0.2em] text-orange-400">
+          Inventory
+        </p>
 
-          <h1 className="mt-3 text-4xl font-bold md:text-5xl">
-            Find your next motorcycle
-          </h1>
+        <h1 className="mt-2 text-4xl font-bold">
+          Shop Motorcycles
+        </h1>
 
-          <p className="mt-4 max-w-2xl text-slate-400">
-            Browse our currently available used motorcycles.
-            View specifications, pricing, mileage, condition,
-            and other important details before placing an order.
+        <p className="mt-3 text-slate-400">
+          Search and filter the current inventory.
+        </p>
+
+        <form className="mt-8 rounded-3xl border border-white/10 bg-white/5 p-6">
+          <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+            <input
+              name="search"
+              defaultValue={search}
+              placeholder="Search make, model or stock #"
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+            />
+
+            <select
+              name="make"
+              defaultValue={make}
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            >
+              <option value="">All Makes</option>
+
+              {makes.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+
+            <select
+              name="type"
+              defaultValue={type}
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            >
+              <option value="">All Types</option>
+
+              {bikeTypes.map((item) => (
+                <option key={item} value={item}>
+                  {item}
+                </option>
+              ))}
+            </select>
+
+            <select
+              name="status"
+              defaultValue={status}
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            >
+              <option value="">Available & Reserved</option>
+              <option value="available">Available</option>
+              <option value="reserved">Reserved</option>
+            </select>
+
+            <input
+              type="number"
+              name="minPrice"
+              defaultValue={params.minPrice}
+              min="0"
+              placeholder="Minimum price"
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            />
+
+            <input
+              type="number"
+              name="maxPrice"
+              defaultValue={params.maxPrice}
+              min="0"
+              placeholder="Maximum price"
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            />
+
+            <select
+              name="sort"
+              defaultValue={sort}
+              className="rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+            >
+              <option value="newest">
+                Newest Listings
+              </option>
+              <option value="price-low">
+                Price: Low to High
+              </option>
+              <option value="price-high">
+                Price: High to Low
+              </option>
+              <option value="mileage">
+                Lowest Mileage
+              </option>
+              <option value="year">
+                Newest Model Year
+              </option>
+            </select>
+
+            <button
+              type="submit"
+              className="rounded-xl bg-orange-500 px-5 py-3 font-bold hover:bg-orange-400"
+            >
+              Search Inventory
+            </button>
+          </div>
+
+          <div className="mt-4">
+            <Link
+              href="/shop"
+              className="text-sm font-semibold text-slate-400 hover:text-white"
+            >
+              Clear Filters
+            </Link>
+          </div>
+        </form>
+
+        <div className="mt-10 flex items-center justify-between">
+          <p className="text-slate-400">
+            {bikesWithImages.length} motorcycle
+            {bikesWithImages.length === 1 ? "" : "s"} found
           </p>
         </div>
 
         {bikesWithImages.length > 0 ? (
-          <div className="grid gap-7 md:grid-cols-2 xl:grid-cols-3">
+          <div className="mt-6 grid gap-6 md:grid-cols-2 lg:grid-cols-3">
             {bikesWithImages.map((bike) => (
               <article
                 key={bike.id}
-                className="overflow-hidden rounded-3xl border border-white/10 bg-white/5 shadow-2xl backdrop-blur-xl"
+                className="overflow-hidden rounded-3xl border border-white/10 bg-white/5"
               >
-                <div className="relative h-64 bg-white/5">
+                <div className="relative aspect-[16/10] bg-slate-900">
                   {bike.imageUrl ? (
                     <img
                       src={bike.imageUrl}
@@ -140,120 +322,64 @@ export default async function ShopPage() {
                       className="h-full w-full object-cover"
                     />
                   ) : (
-                    <div className="flex h-full items-center justify-center text-sm text-slate-500">
-                      Image unavailable
+                    <div className="flex h-full items-center justify-center text-slate-500">
+                      No image available
                     </div>
                   )}
 
-                  <div className="absolute left-4 top-4 rounded-full bg-[#07111f]/80 px-3 py-1 text-xs font-bold capitalize backdrop-blur">
+                  <span className="absolute left-4 top-4 rounded-full bg-[#07111f]/90 px-3 py-1 text-xs font-bold capitalize">
                     {bike.status}
-                  </div>
+                  </span>
                 </div>
 
                 <div className="p-6">
-                  <div className="flex items-start justify-between gap-4">
-                    <div>
-                      <p className="text-sm text-slate-400">
-                        {bike.model_year} • {bike.bike_type}
-                      </p>
+                  <p className="text-sm font-semibold text-orange-400">
+                    {bike.model_year} · {bike.bike_type}
+                  </p>
 
-                      <h2 className="mt-1 text-2xl font-bold">
-                        {bike.make} {bike.model}
-                      </h2>
-                    </div>
+                  <h2 className="mt-2 text-2xl font-bold">
+                    {bike.make} {bike.model}
+                  </h2>
 
-                    <p className="whitespace-nowrap text-xl font-bold text-orange-400">
+                  <div className="mt-4 flex items-center justify-between">
+                    <p className="text-xl font-bold">
                       $
                       {(
                         bike.price_cents / 100
-                      ).toLocaleString("en-US", {
-                        minimumFractionDigits: 0,
-                        maximumFractionDigits: 2,
-                      })}
+                      ).toLocaleString("en-US")}
+                    </p>
+
+                    <p className="text-sm text-slate-400">
+                      {bike.mileage?.toLocaleString() ?? 0} miles
                     </p>
                   </div>
 
-                  <div className="mt-6 grid grid-cols-2 gap-3">
-                    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-xs text-slate-500">
-                        Mileage
-                      </p>
-
-                      <p className="mt-1 font-semibold">
-                        {bike.mileage.toLocaleString()} mi
-                      </p>
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-xs text-slate-500">
-                        Engine
-                      </p>
-
-                      <p className="mt-1 font-semibold">
-                        {bike.engine_capacity_cc
-                          ? `${bike.engine_capacity_cc} cc`
-                          : bike.fuel_type === "Electric"
-                            ? "Electric"
-                            : "N/A"}
-                      </p>
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-xs text-slate-500">
-                        Transmission
-                      </p>
-
-                      <p className="mt-1 font-semibold">
-                        {bike.transmission}
-                      </p>
-                    </div>
-
-                    <div className="rounded-xl border border-white/10 bg-white/5 p-3">
-                      <p className="text-xs text-slate-500">
-                        Fuel Type
-                      </p>
-
-                      <p className="mt-1 font-semibold">
-                        {bike.fuel_type}
-                      </p>
-                    </div>
-                  </div>
-
-                  <p className="mt-5 line-clamp-3 text-sm leading-6 text-slate-400">
-                    {bike.description}
-                  </p>
-
-                  <div className="mt-6 grid grid-cols-2 gap-3">
+                  <div className="mt-6 flex gap-3">
                     <Link
                       href={`/bikes/${bike.id}`}
-                      className="flex items-center justify-center rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-bold transition hover:bg-white/10"
+                      className="flex-1 rounded-xl bg-orange-500 px-4 py-3 text-center font-bold hover:bg-orange-400"
                     >
                       View Details
                     </Link>
 
-                    <Link
-                      href={`/order/${bike.id}`}
-                      className="flex items-center justify-center rounded-xl bg-orange-500 px-4 py-3 text-sm font-bold transition hover:bg-orange-400"
-                    >
-                      Order Now
-                    </Link>
+                    <FavoriteButton bikeId={bike.id} />
                   </div>
                 </div>
               </article>
             ))}
           </div>
         ) : (
-          <div className="rounded-3xl border border-white/10 bg-white/5 px-6 py-20 text-center">
-            <h2 className="text-2xl font-bold">
-              No bikes available right now
+          <div className="mt-8 rounded-3xl border border-white/10 bg-white/5 p-12 text-center">
+            <h2 className="text-xl font-bold">
+              No motorcycles found
             </h2>
 
-            <p className="mt-3 text-slate-400">
-              New motorcycles will appear here when they are published.
+            <p className="mt-2 text-slate-400">
+              Try changing your search or filters.
             </p>
           </div>
         )}
-      </section>
+      </div>
     </main>
   );
 }

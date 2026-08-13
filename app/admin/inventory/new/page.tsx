@@ -1,135 +1,12 @@
-import { redirect } from "next/navigation";
-import { createClient } from "@/lib/supabase/server";
+"use client";
 
-async function createBike(formData: FormData) {
-  "use server";
+import Link from "next/link";
+import { FormEvent, useEffect, useState } from "react";
+import { useRouter } from "next/navigation";
+import { createClient } from "@/lib/supabase/client";
 
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/admin/login");
-  }
-
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role, is_active")
-    .eq("id", user.id)
-    .single();
-
-  if (
-    !profile ||
-    profile.role !== "admin" ||
-    profile.is_active !== true
-  ) {
-    redirect("/admin/login");
-  }
-
-  const stockNumber = String(formData.get("stock_number") ?? "").trim();
-  const make = String(formData.get("make") ?? "").trim();
-  const model = String(formData.get("model") ?? "").trim();
-  const transmission = String(formData.get("transmission") ?? "").trim();
-  const fuelType = String(formData.get("fuel_type") ?? "").trim();
-  const bikeType = String(formData.get("bike_type") ?? "").trim();
-  const condition = String(formData.get("condition") ?? "").trim();
-  const description = String(formData.get("description") ?? "").trim();
-  const status = String(formData.get("status") ?? "draft");
-
-  const modelYear = Number(formData.get("model_year"));
-  const price = Number(formData.get("price"));
-  const mileage = Number(formData.get("mileage"));
-  const engineCapacityRaw = formData.get("engine_capacity_cc");
-  const published = formData.get("published") === "on";
-
-  const engineCapacity =
-    engineCapacityRaw && String(engineCapacityRaw).trim() !== ""
-      ? Number(engineCapacityRaw)
-      : null;
-
-  if (
-    !stockNumber ||
-    !make ||
-    !model ||
-    !transmission ||
-    !fuelType ||
-    !bikeType ||
-    !condition ||
-    !description
-  ) {
-    throw new Error("Missing required bike information.");
-  }
-
-  if (
-    !Number.isInteger(modelYear) ||
-    modelYear < 1900 ||
-    modelYear > 2100
-  ) {
-    throw new Error("Invalid model year.");
-  }
-
-  if (!Number.isFinite(price) || price < 0) {
-    throw new Error("Invalid price.");
-  }
-
-  if (!Number.isInteger(mileage) || mileage < 0) {
-    throw new Error("Invalid mileage.");
-  }
-
-  if (
-    engineCapacity !== null &&
-    (!Number.isInteger(engineCapacity) || engineCapacity < 0)
-  ) {
-    throw new Error("Invalid engine capacity.");
-  }
-
-  const allowedStatuses = [
-    "draft",
-    "available",
-    "reserved",
-    "sold",
-  ];
-
-  if (!allowedStatuses.includes(status)) {
-    throw new Error("Invalid bike status.");
-  }
-
-  const priceCents = Math.round(price * 100);
-
-  const { data: newBike, error: bikeError } = await supabase
-  .from("bikes")
-  .insert({
-    stock_number: stockNumber,
-    make,
-    model,
-    model_year: modelYear,
-    price_cents: priceCents,
-    mileage,
-    engine_capacity_cc: engineCapacity,
-    transmission,
-    fuel_type: fuelType,
-    bike_type: bikeType,
-    condition,
-    description,
-    status,
-    published,
-    created_by: user.id,
-  })
-  .select("id")
-  .single();
-
-if (bikeError || !newBike) {
-  console.error("Create bike error:", bikeError);
-  throw new Error("Could not save the bike.");
-}
-
-const imageFile = formData.get("bike_image");
-
-if (!(imageFile instanceof File) || imageFile.size === 0) {
-  throw new Error("A bike image is required.");
-}
+const MAX_IMAGES = 10;
+const MAX_IMAGE_SIZE = 8 * 1024 * 1024;
 
 const allowedImageTypes = [
   "image/jpeg",
@@ -137,338 +14,710 @@ const allowedImageTypes = [
   "image/webp",
 ];
 
-if (!allowedImageTypes.includes(imageFile.type)) {
-  throw new Error("Only JPG, PNG, and WebP images are allowed.");
-}
+export default function NewBikePage() {
+  const router = useRouter();
+  const supabase = createClient();
 
-const maxImageSize = 8 * 1024 * 1024;
+  const [checkingAuth, setCheckingAuth] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [errorMessage, setErrorMessage] = useState("");
+  const [selectedImages, setSelectedImages] = useState<File[]>([]);
 
-if (imageFile.size > maxImageSize) {
-  throw new Error("Image must be smaller than 8 MB.");
-}
+  useEffect(() => {
+    async function checkAdmin() {
+      const {
+        data: { user },
+      } = await supabase.auth.getUser();
 
-const fileExtension =
-  imageFile.name.split(".").pop()?.toLowerCase() || "jpg";
+      if (!user) {
+        router.replace("/admin/login");
+        return;
+      }
 
-const imagePath =
-  `${newBike.id}/${crypto.randomUUID()}.${fileExtension}`;
+      const { data: profile } = await supabase
+        .from("profiles")
+        .select("role, is_active")
+        .eq("id", user.id)
+        .single();
 
-const { error: uploadError } = await supabase.storage
-  .from("bike-images")
-  .upload(imagePath, imageFile, {
-    contentType: imageFile.type,
-    upsert: false,
-  });
+      if (
+        !profile ||
+        profile.role !== "admin" ||
+        profile.is_active !== true
+      ) {
+        await supabase.auth.signOut();
+        router.replace("/admin/login");
+        return;
+      }
 
-if (uploadError) {
-  console.error("Image upload error:", uploadError);
+      setCheckingAuth(false);
+    }
 
-  await supabase
-    .from("bikes")
-    .delete()
-    .eq("id", newBike.id);
+    checkAdmin();
+  }, [router, supabase]);
 
-  throw new Error("Could not upload the bike image.");
-}
+  function handleImageSelection(
+    event: React.ChangeEvent<HTMLInputElement>
+  ) {
+    const files = Array.from(event.target.files ?? []);
 
-const { error: imageRecordError } = await supabase
-  .from("bike_images")
-  .insert({
-    bike_id: newBike.id,
-    storage_path: imagePath,
-    alt_text: `${modelYear} ${make} ${model}`,
-    display_order: 0,
-  });
+    setErrorMessage("");
 
-if (imageRecordError) {
-  console.error("Image record error:", imageRecordError);
+    if (files.length > MAX_IMAGES) {
+      setSelectedImages([]);
+      event.target.value = "";
+      setErrorMessage(
+        `You can upload a maximum of ${MAX_IMAGES} pictures per motorcycle.`
+      );
+      return;
+    }
 
-  await supabase.storage
-    .from("bike-images")
-    .remove([imagePath]);
+    for (const file of files) {
+      if (!allowedImageTypes.includes(file.type)) {
+        setSelectedImages([]);
+        event.target.value = "";
+        setErrorMessage(
+          "Only JPG, PNG, and WebP pictures are allowed."
+        );
+        return;
+      }
 
-  await supabase
-    .from("bikes")
-    .delete()
-    .eq("id", newBike.id);
+      if (file.size > MAX_IMAGE_SIZE) {
+        setSelectedImages([]);
+        event.target.value = "";
+        setErrorMessage(
+          `Each picture must be smaller than 8 MB. "${file.name}" is too large.`
+        );
+        return;
+      }
+    }
 
-  throw new Error("Could not save the bike image information.");
-}
-
-  redirect("/admin/inventory");
-}
-
-
-export default async function NewBikePage() {
-  const supabase = await createClient();
-
-  const {
-    data: { user },
-  } = await supabase.auth.getUser();
-
-  if (!user) {
-    redirect("/admin/login");
+    setSelectedImages(files);
   }
 
-  const { data: profile } = await supabase
-    .from("profiles")
-    .select("role, is_active")
-    .eq("id", user.id)
-    .single();
-
-  if (
-    !profile ||
-    profile.role !== "admin" ||
-    profile.is_active !== true
+  async function handleSubmit(
+    event: FormEvent<HTMLFormElement>
   ) {
-    redirect("/admin/login");
+    event.preventDefault();
+
+    setSubmitting(true);
+    setErrorMessage("");
+
+    const form = event.currentTarget;
+    const formData = new FormData(form);
+
+    const stockNumber = String(
+      formData.get("stock_number") ?? ""
+    ).trim();
+
+    const make = String(
+      formData.get("make") ?? ""
+    ).trim();
+
+    const model = String(
+      formData.get("model") ?? ""
+    ).trim();
+
+    const modelYear = Number(
+      formData.get("model_year")
+    );
+
+    const price = Number(
+      formData.get("price")
+    );
+
+    const mileage = Number(
+      formData.get("mileage")
+    );
+
+    const engineCapacity = Number(
+      formData.get("engine_capacity_cc")
+    );
+
+    const transmission = String(
+      formData.get("transmission") ?? ""
+    ).trim();
+
+    const fuelType = String(
+      formData.get("fuel_type") ?? ""
+    ).trim();
+
+    const bikeType = String(
+      formData.get("bike_type") ?? ""
+    ).trim();
+
+    const condition = String(
+      formData.get("condition") ?? ""
+    ).trim();
+
+    const status = String(
+      formData.get("status") ?? ""
+    ).trim();
+
+    const description = String(
+      formData.get("description") ?? ""
+    ).trim();
+
+    const published =
+      formData.get("published") === "on";
+
+    if (
+      !stockNumber ||
+      !make ||
+      !model ||
+      !modelYear ||
+      !price ||
+      !transmission ||
+      !fuelType ||
+      !bikeType ||
+      !condition ||
+      !status
+    ) {
+      setErrorMessage(
+        "Please complete all required fields."
+      );
+      setSubmitting(false);
+      return;
+    }
+
+    if (selectedImages.length > MAX_IMAGES) {
+      setErrorMessage(
+        `You can upload a maximum of ${MAX_IMAGES} pictures.`
+      );
+      setSubmitting(false);
+      return;
+    }
+
+    const {
+      data: { user },
+    } = await supabase.auth.getUser();
+
+    if (!user) {
+      router.replace("/admin/login");
+      return;
+    }
+
+    const { data: newBike, error: bikeError } =
+      await supabase
+        .from("bikes")
+        .insert({
+          stock_number: stockNumber,
+          make,
+          model,
+          model_year: modelYear,
+          price_cents: Math.round(price * 100),
+          mileage: Number.isFinite(mileage)
+            ? mileage
+            : 0,
+          engine_capacity_cc:
+            Number.isFinite(engineCapacity)
+              ? engineCapacity
+              : null,
+          transmission,
+          fuel_type: fuelType,
+          bike_type: bikeType,
+          condition,
+          status,
+          description:
+            description || null,
+          published,
+          created_by: user.id,
+        })
+        .select("id")
+        .single();
+
+    if (bikeError || !newBike) {
+      console.error(
+        "Create bike error:",
+        bikeError
+      );
+
+      setErrorMessage(
+        bikeError?.message ??
+          "Could not create the motorcycle."
+      );
+
+      setSubmitting(false);
+      return;
+    }
+
+    const uploadedPaths: string[] = [];
+    const imageRows: {
+      bike_id: string;
+      storage_path: string;
+      alt_text: string;
+      display_order: number;
+    }[] = [];
+
+    try {
+      for (
+        let index = 0;
+        index < selectedImages.length;
+        index++
+      ) {
+        const file = selectedImages[index];
+
+        const extension =
+          file.name.split(".").pop()?.toLowerCase() ||
+          "jpg";
+
+        const storagePath =
+          `${newBike.id}/${crypto.randomUUID()}.${extension}`;
+
+        const { error: uploadError } =
+          await supabase.storage
+            .from("bike-images")
+            .upload(storagePath, file, {
+              cacheControl: "3600",
+              upsert: false,
+              contentType: file.type,
+            });
+
+        if (uploadError) {
+          throw uploadError;
+        }
+
+        uploadedPaths.push(storagePath);
+
+        imageRows.push({
+          bike_id: newBike.id,
+          storage_path: storagePath,
+          alt_text:
+            `${modelYear} ${make} ${model} - photo ${index + 1}`,
+          display_order: index,
+        });
+      }
+
+      if (imageRows.length > 0) {
+        const { error: imageInsertError } =
+          await supabase
+            .from("bike_images")
+            .insert(imageRows);
+
+        if (imageInsertError) {
+          throw imageInsertError;
+        }
+      }
+    } catch (error) {
+      console.error(
+        "Gallery upload error:",
+        error
+      );
+
+      if (uploadedPaths.length > 0) {
+        await supabase.storage
+          .from("bike-images")
+          .remove(uploadedPaths);
+      }
+
+      await supabase
+        .from("bikes")
+        .delete()
+        .eq("id", newBike.id);
+
+      setErrorMessage(
+        error instanceof Error
+          ? error.message
+          : "The motorcycle pictures could not be uploaded."
+      );
+
+      setSubmitting(false);
+      return;
+    }
+
+    router.push("/admin/inventory");
+    router.refresh();
+  }
+
+  if (checkingAuth) {
+    return (
+      <main className="flex min-h-screen items-center justify-center bg-[#07111f] text-white">
+        <p className="text-slate-400">
+          Loading...
+        </p>
+      </main>
+    );
   }
 
   return (
     <main className="min-h-screen bg-[#07111f] px-6 py-10 text-white">
-      <div className="mx-auto max-w-4xl">
-        <div className="mb-8">
-          <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-400">
-            Jeffrey Smith Used Bikes
-          </p>
+      <div className="mx-auto max-w-5xl">
+        <div className="mb-8 flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <p className="text-sm font-semibold uppercase tracking-[0.2em] text-orange-400">
+              Jeffrey Smith Used Bikes
+            </p>
 
-          <h1 className="mt-2 text-4xl font-bold">
-            Add New Bike
-          </h1>
+            <h1 className="mt-2 text-4xl font-bold">
+              Add Motorcycle
+            </h1>
 
-          <p className="mt-2 text-slate-400">
-            Enter the motorcycle details below.
-          </p>
+            <p className="mt-2 text-slate-400">
+              Add a used motorcycle and upload
+              its photo gallery.
+            </p>
+          </div>
+
+          <Link
+            href="/admin/inventory"
+            className="rounded-xl border border-white/10 bg-white/5 px-5 py-3 font-semibold transition hover:bg-white/10"
+          >
+            Back to Inventory
+          </Link>
         </div>
 
-        <form action={createBike}
-        className="rounded-3xl border border-white/10 bg-white/5 p-8 backdrop-blur-xl">
-            <div className="grid gap-6 md:grid-cols-2">
+        <form
+          onSubmit={handleSubmit}
+          className="rounded-3xl border border-white/10 bg-white/5 p-6 backdrop-blur-xl md:p-8"
+        >
+          {errorMessage && (
+            <div className="mb-6 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
+              {errorMessage}
+            </div>
+          )}
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Stock Number
-                    </label>
-                    <input
-                        name="stock_number"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+          <div className="grid gap-6 md:grid-cols-2">
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Stock Number *
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Make
-                    </label>
-                    <input
-                        name="make"
-                        required
-                        placeholder="Honda"
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+              <input
+                name="stock_number"
+                required
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Model
-                    </label>
-                    <input
-                        name="model"
-                        required
-                        placeholder="CBR600RR"
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Model Year *
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Year
-                    </label>
-                    <input
-                        name="model_year"
-                        type="number"
-                        min="1900"
-                        max="2100"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+              <input
+                type="number"
+                name="model_year"
+                required
+                min="1900"
+                max="2100"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Price ($)
-                    </label>
-                    <input
-                        name="price"
-                        type="number"
-                        min="0"
-                        step="0.01"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Make *
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Mileage
-                    </label>
-                    <input
-                        name="mileage"
-                        type="number"
-                        min="0"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+              <input
+                name="make"
+                required
+                placeholder="Honda"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Engine Capacity (cc)
-                    </label>
-                    <input
-                        name="engine_capacity_cc"
-                        type="number"
-                        min="0"
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Model *
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Transmission
-                    </label>
-                    <select
-                        name="transmission"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
-                    >
-                        <option value="">Select</option>
-                        <option value="Manual">Manual</option>
-                        <option value="Automatic">Automatic</option>
-                        <option value="Semi-Automatic">Semi-Automatic</option>
-                    </select>
-                </div>
+              <input
+                name="model"
+                required
+                placeholder="Gold Wing"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Fuel Type
-                    </label>
-                    <select
-                        name="fuel_type"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
-                    >
-                        <option value="">Select</option>
-                        <option value="Gasoline">Gasoline</option>
-                        <option value="Electric">Electric</option>
-                        <option value="Hybrid">Hybrid</option>
-                    </select>
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Price ($) *
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Bike Type
-                    </label>
-                    <select
-                        name="bike_type"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
-                    >
-                        <option value="">Select</option>
-                        <option value="Sport">Sport</option>
-                        <option value="Cruiser">Cruiser</option>
-                        <option value="Scooter">Scooter</option>
-                        <option value="Touring">Touring</option>
-                        <option value="Adventure">Adventure</option>
-                        <option value="Dirt Bike">Dirt Bike</option>
-                        <option value="Standard">Standard</option>
-                    </select>
-                </div>
+              <input
+                type="number"
+                name="price"
+                required
+                min="0"
+                step="0.01"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Condition
-                    </label>
-                    <select
-                        name="condition"
-                        required
-                        className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
-                    >
-                        <option value="">Select</option>
-                        <option value="Excellent">Excellent</option>
-                        <option value="Very Good">Very Good</option>
-                        <option value="Good">Good</option>
-                        <option value="Fair">Fair</option>
-                    </select>
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Mileage
+              </label>
 
-                <div>
-                    <label className="mb-2 block text-sm font-semibold">
-                        Status
-                    </label>
-                    <select
-                        name="status"
-                        defaultValue="draft"
-                        className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
-                    >
-                        <option value="draft">Draft</option>
-                        <option value="available">Available</option>
-                        <option value="reserved">Reserved</option>
-                        <option value="sold">Sold</option>
-                    </select>
-                </div>
+              <input
+                type="number"
+                name="mileage"
+                min="0"
+                defaultValue="0"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
 
-                <div className="md:col-span-2">
-                    <label className="mb-2 block text-sm font-semibold">
-                        Description
-                    </label>
-                    <textarea
-                        name="description"
-                        required
-                        rows={6}
-                        className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 outline-none focus:border-orange-500"
-                    />
-                </div>
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Engine Capacity (cc)
+              </label>
 
+              <input
+                type="number"
+                name="engine_capacity_cc"
+                min="0"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Transmission *
+              </label>
+
+              <select
+                name="transmission"
+                required
+                defaultValue=""
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+              >
+                <option value="" disabled>
+                  Select transmission
+                </option>
+
+                <option value="manual">
+                  Manual
+                </option>
+
+                <option value="automatic">
+                  Automatic
+                </option>
+
+                <option value="semi_automatic">
+                  Semi-Automatic
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Fuel Type *
+              </label>
+
+              <select
+                name="fuel_type"
+                required
+                defaultValue="gasoline"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+              >
+                <option value="gasoline">
+                  Gasoline
+                </option>
+
+                <option value="electric">
+                  Electric
+                </option>
+
+                <option value="hybrid">
+                  Hybrid
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Bike Type *
+              </label>
+
+              <select
+                name="bike_type"
+                required
+                defaultValue=""
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+              >
+                <option value="" disabled>
+                  Select bike type
+                </option>
+
+                <option value="cruiser">
+                  Cruiser
+                </option>
+
+                <option value="sport">
+                  Sport
+                </option>
+
+                <option value="touring">
+                  Touring
+                </option>
+
+                <option value="adventure">
+                  Adventure
+                </option>
+
+                <option value="standard">
+                  Standard
+                </option>
+
+                <option value="scooter">
+                  Scooter
+                </option>
+
+                <option value="dual_sport">
+                  Dual Sport
+                </option>
+
+                <option value="trike">
+                  Trike
+                </option>
+
+                <option value="other">
+                  Other
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Condition *
+              </label>
+
+              <select
+                name="condition"
+                required
+                defaultValue="used"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+              >
+                <option value="used">
+                  Used Bike
+                </option>
+
+                <option value="excellent">
+                  Used - Excellent
+                </option>
+
+                <option value="good">
+                  Used - Good
+                </option>
+
+                <option value="fair">
+                  Used - Fair
+                </option>
+              </select>
+            </div>
+
+            <div>
+              <label className="mb-2 block text-sm font-semibold">
+                Status *
+              </label>
+
+              <select
+                name="status"
+                required
+                defaultValue="available"
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3"
+              >
+                <option value="available">
+                  Available
+                </option>
+
+                <option value="reserved">
+                  Reserved
+                </option>
+
+                <option value="sold">
+                  Sold
+                </option>
+
+                <option value="archived">
+                  Archived
+                </option>
+              </select>
             </div>
 
             <div className="md:col-span-2">
-                <label className="mb-2 block text-sm font-semibold">
-                    Bike Image
-                </label>
+              <label className="mb-2 block text-sm font-semibold">
+                Description
+              </label>
 
-                <input
-                    name="bike_image"
-                    type="file"
-                    accept="image/jpeg,image/png,image/webp"
-                    required
-                    className="w-full rounded-xl border border-white/10 bg-white/5 px-4 py-3 text-slate-300 outline-none focus:border-orange-500"
-                />
-
-                <p className="mt-2 text-xs text-slate-500">
-                    Upload a JPG, PNG, or WebP image.
-                </p>
+              <textarea
+                name="description"
+                rows={6}
+                placeholder="Describe the motorcycle, condition, features, service history, etc."
+                className="w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 outline-none focus:border-orange-500"
+              />
             </div>
 
+            <div className="md:col-span-2">
+              <label className="mb-2 block text-sm font-semibold">
+                Motorcycle Gallery
+              </label>
 
-            <div className="mt-8 flex items-center gap-3">
-                <input
-                    id="published"
-                    name="published"
-                    type="checkbox"
-                    className="h-5 w-5"
-                />
-                <label htmlFor="published">
-                    Publish this bike immediately
-                </label>
+              <input
+                type="file"
+                name="bike_images"
+                accept="image/jpeg,image/png,image/webp"
+                multiple
+                onChange={handleImageSelection}
+                className="block w-full rounded-xl border border-white/10 bg-[#0c1728] px-4 py-3 text-sm"
+              />
+
+              <p className="mt-2 text-sm text-slate-500">
+                Upload up to {MAX_IMAGES} JPG,
+                PNG, or WebP pictures. Each
+                picture can be up to 8 MB.
+              </p>
+
+              {selectedImages.length > 0 && (
+                <div className="mt-4 rounded-2xl border border-white/10 bg-black/10 p-4">
+                  <p className="font-semibold">
+                    {selectedImages.length} picture
+                    {selectedImages.length === 1
+                      ? ""
+                      : "s"}{" "}
+                    selected
+                  </p>
+
+                  <div className="mt-3 space-y-1 text-sm text-slate-400">
+                    {selectedImages.map(
+                      (file, index) => (
+                        <p key={`${file.name}-${index}`}>
+                          {index + 1}. {file.name}
+                        </p>
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
-            <button
-                type="submit"
-                className="mt-8 rounded-xl bg-orange-500 px-6 py-3 font-bold transition hover:bg-orange-400"
-            >
-                Save Bike
-            </button>
+            <div className="md:col-span-2">
+              <label className="flex items-center gap-3">
+                <input
+                  type="checkbox"
+                  name="published"
+                  defaultChecked
+                />
+
+                <span className="font-semibold">
+                  Publish this motorcycle on the
+                  website
+                </span>
+              </label>
+            </div>
+          </div>
+
+          <button
+            type="submit"
+            disabled={submitting}
+            className="mt-8 rounded-xl bg-orange-500 px-7 py-3 font-bold transition hover:bg-orange-400 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {submitting
+              ? "Saving Motorcycle..."
+              : "Add Motorcycle"}
+          </button>
         </form>
       </div>
     </main>
